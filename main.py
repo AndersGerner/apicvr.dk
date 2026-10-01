@@ -6,7 +6,7 @@ from typing import List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import PlainTextResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -194,23 +194,6 @@ async def home_da(request: Request):
 @app.get("/en/", include_in_schema=False)
 async def home_en(request: Request):
     return templates.TemplateResponse("/homepage_en.html", _base_context(request))
-
-
-# --- MCP marketing pages ---------------------------------------------------
-
-@app.get("/da/mcp", include_in_schema=False)
-async def mcp_da(request: Request):
-    return templates.TemplateResponse("/mcp_da.html", _base_context(request))
-
-
-@app.get("/en/mcp", include_in_schema=False)
-async def mcp_en(request: Request):
-    return templates.TemplateResponse("/mcp_en.html", _base_context(request))
-
-
-@app.get("/mcp", include_in_schema=False)
-async def mcp_redirect():
-    return RedirectResponse("/da/mcp", status_code=301)
 
 
 # --- Search UI -------------------------------------------------------------
@@ -470,8 +453,6 @@ _SITEMAP_URLS = [
     # (loc, hreflang_pairs, changefreq, priority)
     ("https://apicvr.dk/", [("da", "https://apicvr.dk/"), ("en", "https://apicvr.dk/en/")], "weekly", "1.0"),
     ("https://apicvr.dk/en/", [("da", "https://apicvr.dk/"), ("en", "https://apicvr.dk/en/")], "weekly", "1.0"),
-    ("https://apicvr.dk/da/mcp", [("da", "https://apicvr.dk/da/mcp"), ("en", "https://apicvr.dk/en/mcp")], "monthly", "0.9"),
-    ("https://apicvr.dk/en/mcp", [("da", "https://apicvr.dk/da/mcp"), ("en", "https://apicvr.dk/en/mcp")], "monthly", "0.9"),
     ("https://apicvr.dk/docs", [], "monthly", "0.8"),
     ("https://apicvr.dk/da/kapitalsog/", [], "monthly", "0.5"),
 ]
