@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: leasio-cvr-staging
+    runtime: docker
+    repo: https://github.com/AndersGerner/apicvr.dk
+    branch: master
+    plan: free
+    region: frankfurt
+    autoDeployTrigger: off
+    healthCheckPath: /healthz
+    envVars:
+      - key: API_TOKEN
+        sync: false
+      - key: STATS_ENABLED
+        value: "false"

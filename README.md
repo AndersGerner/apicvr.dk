@@ -1,3 +1,10 @@
+# Leasio CVR fork
+
+Our hosted CVR service and registered signing-evidence extension are documented
+in [Lead staging integration](docs/lead-signing.md).
+
+The original project documentation follows for attribution and context.
+
 # API CVR
 
 Et simpelt REST‑API til opslag i CVR. En kørende version findes på [apicvr.dk](https://apicvr.dk).

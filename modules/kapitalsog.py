@@ -1,4 +1,3 @@
-import requests
 import json
 import re
 from fastapi import FastAPI, Request, Form
@@ -27,12 +26,6 @@ jinja_env.globals['bootstrap'] = {
 
 
 def show_capital_result(cvr_number: str):
-    url = "http://distribution.virk.dk/registreringstekster/registreringstekst/_search"
-    headers = {
-        "Authorization": "Basic " + APITOKEN,
-        "Content-Type": "application/json"
-    }
-
     # Construct the request payload
     payload = {
         "size": 3000,
@@ -49,8 +42,11 @@ def show_capital_result(cvr_number: str):
         }
     }
 
-    response = requests.post(url, headers=headers, json=payload)
-    data = json.loads(response.text)
+    from apis.searchcvr import _post_search, _is_error
+    from fastapi import HTTPException
+    data = _post_search(payload["query"], endpoint="https://distribution.virk.dk/registreringstekster/registreringstekst/_search", size=3000, source=["*"])
+    if _is_error(data):
+        raise HTTPException(status_code=503 if data["error"] == "NOT_CONFIGURED" else 502, detail=data)
 
     aendring_kapital_entries = []
     hits = data.get("hits", {}).get("hits", [])

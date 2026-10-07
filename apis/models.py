@@ -5,14 +5,15 @@ These are used with FastAPI's ``response_model`` so the OpenAPI schema
 (and /docs) shows a real contract. ``extra = "allow"`` keeps any future
 fields flowing through without needing a schema bump on the caller side.
 """
+from datetime import date, datetime
 from typing import Any, List, Optional, Union
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class _Loose(BaseModel):
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 # --- Building blocks -------------------------------------------------------
@@ -89,6 +90,43 @@ class Ejer(_Loose):
 
 # --- Top-level responses --------------------------------------------------
 
+class SigningValidity(BaseModel):
+    validFrom: Optional[date]
+    validTo: Optional[date]
+    updatedAt: Optional[Union[date, datetime]]
+
+
+class SigningRule(SigningValidity):
+    text: str = Field(..., min_length=1, max_length=10000)
+
+
+class SigningRole(SigningValidity):
+    organisationType: Literal["LEDELSESORGAN", "TEGNINGSBERETTIGEDE", "FULDT_ANSVARLIG_DELTAGERE"]
+    role: str = Field(..., min_length=1, max_length=200)
+
+
+class SigningParticipant(BaseModel):
+    unitId: str = Field(..., pattern=r"^[0-9]{10}$")
+    name: str = Field(..., min_length=1, max_length=300)
+    entityType: Literal["PERSON", "VIRKSOMHED", "ANDEN DELTAGER"]
+    registeredRepresentative: bool
+    roles: List[SigningRole] = Field(..., min_length=1, max_length=100)
+
+
+class SigningSource(BaseModel):
+    register_name: Literal["CVR"] = Field(..., alias="register")
+    observedAt: datetime
+    companyUpdatedAt: Optional[Union[date, datetime]]
+
+
+class SigningEvidence(BaseModel):
+    schemaVersion: Literal[1]
+    status: Literal["available", "missing_rule", "conflicting_rules", "incomplete"]
+    rules: List[SigningRule] = Field(..., max_length=10)
+    participants: List[SigningParticipant] = Field(..., max_length=200)
+    source: SigningSource
+
+
 class Company(_Loose):
     """Full company profile returned by ``/api/v1/{cvr}``."""
     vat: int = Field(..., description="CVR-number (8 digits).", example=41013583)
@@ -114,6 +152,7 @@ class Company(_Loose):
     companytypeshort: Optional[str] = None
     website: Optional[str] = None
     version: int = 1
+    signing: Optional[SigningEvidence] = Field(None, description="Registered rule and current signing-role evidence; not a determination that one person may sign alone.")
     p_units: List[PUnit] = []
     direktion: List[Direktor] = []
     fuldt_ansvarlige: List[FuldtAnsvarlig] = []
@@ -146,3 +185,16 @@ def not_found_responses() -> dict:
 def upstream_error_responses() -> dict:
     """Attach a 502 shape for upstream failures."""
     return {502: {"model": ErrorResponse, "description": "CVR distribution API error"}}
+
+
+class SigningCompany(BaseModel):
+    """Bounded Lead profile; excludes personal addresses and ownership data."""
+    vat: int
+    name: Optional[str] = None
+    address: Optional[str] = None
+    zipcode: Optional[int] = None
+    city: Optional[str] = None
+    companydesc: Optional[str] = None
+    status: Optional[str] = None
+    protected: Optional[bool] = None
+    signing: SigningEvidence
