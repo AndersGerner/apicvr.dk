@@ -14,16 +14,22 @@ from test_signing_evidence import company
 
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
+        token = patch.object(searchcvr, "_API_TOKEN", "synthetic")
+        token.start()
+        self.addCleanup(token.stop)
         self.client = TestClient(app)
 
-    def test_missing_access_is_503_without_network_or_client_auth(self):
+    def test_readiness_reports_selected_provider_without_claiming_live_access(self):
         with patch.object(searchcvr, "_API_TOKEN", ""), patch.object(searchcvr.httpx, "AsyncClient") as post:
-            response = self.client.get("/api/v1/12345674/signing-profile")
-            self.assertEqual(response.status_code, 503)
-            self.assertEqual(response.json()["detail"]["error"], "NOT_CONFIGURED")
-            self.assertEqual(self.client.get("/readyz").status_code, 503)
+            response = self.client.get("/readyz")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {"status": "configured", "provider": "apicvr.dk",
+                                              "signingEvidenceSupported": False, "upstreamVerified": False})
             self.assertEqual(self.client.get("/healthz").status_code, 200)
             post.assert_not_called()
+        self.assertEqual(self.client.get("/readyz").json(), {
+            "status": "configured", "provider": "distribution.virk.dk",
+            "signingEvidenceSupported": True, "upstreamVerified": False})
 
     def test_http_profile_preserves_signing_contract_and_omits_private_details(self):
         source = company()

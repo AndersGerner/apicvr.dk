@@ -127,6 +127,12 @@ class SigningTests(unittest.TestCase):
 
 
 class UpstreamWiringTests(unittest.TestCase):
+    def setUp(self):
+        from unittest.mock import patch
+        token = patch("apis.searchcvr._API_TOKEN", "synthetic")
+        token.start()
+        self.addCleanup(token.stop)
+
     def test_exact_lookup_exposes_typed_signing_without_changing_existing_fields(self):
         from unittest.mock import patch
         from fastapi.encoders import jsonable_encoder

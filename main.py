@@ -22,6 +22,7 @@ from apis.models import (
 )
 from apis.searchcvr import (
     get_company_relations,
+    selected_provider,
     upstream_configured,
     search_cvr_api,
     search_cvr_by_address,
@@ -74,9 +75,9 @@ class RequestLogMiddleware(BaseHTTPMiddleware):
 _API_DESCRIPTION = """
 Free & open-source JSON API for the Danish company register (CVR).
 
-Every endpoint proxies **distribution.virk.dk** (ERST's official
-distribution API), does the hard work of navigating its nested schema,
-and returns a clean, stable shape.
+When the operator configures `API_TOKEN`, endpoints query **distribution.virk.dk**
+(ERST's official distribution API). Without it, company and search endpoints use
+the hosted **apicvr.dk** API. Both modes return a stable shape.
 
 ### Quickstart
 
@@ -95,9 +96,11 @@ curl https://YOUR_SERVICE/api/v1/41013583/signing-profile
 
 ### Auth
 
-No client credentials. The service operator must configure issued official
-CVR distribution credentials. Signing evidence requires operator interpretation
-of the complete registered rule; it never means a person can sign alone.
+No client credentials. Official mode requires issued CVR distribution credentials.
+Hosted fallback provides company enrichment but no registered signing rule or stable
+signing-participant IDs, so its signing evidence is explicitly incomplete. A configured
+token selects official mode exclusively; authentication failures do not trigger fallback.
+Complete signing evidence still requires operator interpretation of the registered rule.
 
 ### Source & issues
 
@@ -181,13 +184,12 @@ def health():
 
 @app.get("/readyz", include_in_schema=False)
 def ready():
-    if not upstream_configured():
-        raise HTTPException(status_code=503, detail="Official CVR access is not configured")
-    return {"status": "configured", "upstreamVerified": False}
+    return {"status": "configured", "provider": selected_provider(),
+            "signingEvidenceSupported": upstream_configured(), "upstreamVerified": False}
 
 
 @app.get("/api/v1/{cvrNumber}/signing-profile", response_model=SigningCompany, tags=["Companies"],
-         responses={**not_found_responses(), **upstream_error_responses(), 503: {"description": "Official access not configured"}})
+         responses={**not_found_responses(), **upstream_error_responses()})
 def signing_profile(cvrNumber: int):
     return _unwrap(search_cvr_api(cvrNumber, include_relations=False))
 
