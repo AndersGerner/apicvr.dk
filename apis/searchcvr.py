@@ -12,10 +12,13 @@ Route handlers convert these to HTTPException; templates render an error box.
 import json
 import os
 import re
+import asyncio
 from typing import Any, Iterable, Optional
 
-import requests
+import httpx
 from dotenv import load_dotenv
+
+from apis.signing import extract_signing
 
 
 load_dotenv()
@@ -23,10 +26,12 @@ load_dotenv()
 # --- Configuration ---------------------------------------------------------
 
 _API_TOKEN = os.getenv("API_TOKEN", "")
-_BASE = "http://distribution.virk.dk"
+_BASE = "https://distribution.virk.dk"
 _COMPANY_URL = f"{_BASE}/cvr-permanent/virksomhed/_search"
 _PRODUCTION_UNIT_URL = f"{_BASE}/cvr-permanent/produktionsenhed/_search"
-_TIMEOUT = 10
+_TIMEOUT = httpx.Timeout(3, connect=2)
+_MAX_RESPONSE_BYTES = 8_000_000
+_TOTAL_SECONDS = 8
 
 _HEADERS = {
     "Authorization": f"Basic {_API_TOKEN}",
@@ -65,28 +70,37 @@ def _post_search(
         "query": query,
         "size": size,
     }
-    try:
-        response = requests.post(
-            endpoint, headers=_HEADERS, data=json.dumps(payload), timeout=_TIMEOUT
-        )
-    except requests.RequestException as exc:
-        return {"error": "TRANSPORT_ERROR", "status": None, "message": str(exc)}
+    if not upstream_configured():
+        return {"error": "NOT_CONFIGURED", "status": 503, "message": None}
+    return asyncio.run(_post_search_bounded(endpoint, payload))
 
-    if response.status_code != 200:
-        return {
-            "error": "HTTP_ERROR",
-            "status": response.status_code,
-            "message": response.text,
-        }
 
+async def _post_search_bounded(endpoint: str, payload: dict) -> Any:
+    # This deadline includes connect, headers and slow/trickled body reads.
     try:
-        return response.json()
-    except ValueError:
-        return {
-            "error": "INVALID_RESPONSE",
-            "status": response.status_code,
-            "message": response.text,
-        }
+        async with asyncio.timeout(_TOTAL_SECONDS):
+            async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=False) as client:
+                async with client.stream("POST", endpoint, headers=_HEADERS, json=payload) as response:
+                    if response.status_code != 200:
+                        return {"error": "HTTP_ERROR", "status": response.status_code, "message": None}
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        if len(body) + len(chunk) > _MAX_RESPONSE_BYTES:
+                            return {"error": "INVALID_RESPONSE", "status": 502, "message": None}
+                        body.extend(chunk)
+                    result = json.loads(body)
+                    if not isinstance(result, dict):
+                        return {"error": "INVALID_RESPONSE", "status": 502, "message": None}
+                    return result
+    except (httpx.HTTPError, TimeoutError):
+        return {"error": "TRANSPORT_ERROR", "status": 502, "message": None}
+    except (ValueError, UnicodeError):
+        return {"error": "INVALID_RESPONSE", "status": 502, "message": None}
+
+
+def upstream_configured() -> bool:
+    """Presence only; successful official authentication needs a live lookup."""
+    return bool(_API_TOKEN.strip())
 
 
 def _is_error(result: Any) -> bool:
@@ -116,18 +130,38 @@ def _not_found() -> dict:
 
 # --- Public search API -----------------------------------------------------
 
-def search_cvr_api(cvr_number: int) -> dict:
+def search_cvr_api(cvr_number: int, *, include_relations: bool = True) -> dict:
     """Look up a company by CVR number, including production units and relations."""
-    result = _post_search({"term": {"Vrvirksomhed.cvrNummer": cvr_number}}, size=1)
+    if re.fullmatch(r"[1-9][0-9]{7}", str(cvr_number)) is None:
+        return {"error": "INVALID_CVR", "status": 400, "message": None}
+    result = _post_search({"term": {"Vrvirksomhed.cvrNummer": cvr_number}}, size=2)
     if _is_error(result):
         return result
 
-    hits = _hits(result)
+    envelope = result.get("hits")
+    if not isinstance(envelope, dict) or not isinstance(envelope.get("hits"), list):
+        return {"error": "INVALID_RESPONSE", "status": 502, "message": None}
+    hits = envelope["hits"]
     if not hits:
         return _not_found()
 
-    company = hits[0]["_source"]["Vrvirksomhed"]
+    hit_source = hits[0].get("_source") if isinstance(hits[0], dict) else None
+    company = hit_source.get("Vrvirksomhed") if isinstance(hit_source, dict) else None
+    if not isinstance(company, dict):
+        return {"error": "INVALID_RESPONSE", "status": 502, "message": None}
+    source_cvr = company.get("cvrNummer")
+    if (
+        len(hits) != 1
+        or not isinstance(source_cvr, (str, int))
+        or re.fullmatch(r"[1-9][0-9]{7}", str(source_cvr)) is None
+        or int(source_cvr) != cvr_number
+    ):
+        return {"error": "INVALID_RESPONSE", "status": 502, "message": None}
     data = format_company_data(company, cvr_number)
+    data["signing"] = extract_signing(company)
+
+    if not include_relations:
+        return data
 
     p_numbers = [
         p["pNummer"]

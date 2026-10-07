@@ -14,6 +14,7 @@ from starlette.routing import NoMatchFound
 
 from apis.models import (
     Company,
+    SigningCompany,
     CompanyFuzzy,
     CompanyRelations,
     not_found_responses,
@@ -21,6 +22,7 @@ from apis.models import (
 )
 from apis.searchcvr import (
     get_company_relations,
+    upstream_configured,
     search_cvr_api,
     search_cvr_by_address,
     search_cvr_by_email,
@@ -30,16 +32,19 @@ from apis.searchcvr import (
     search_cvr_by_phone,
     search_cvr_combined,
 )
-from app.modules.kapitalsog import show_capital_result
-from app.modules.stats import get_stats, init_db, log_request
+from modules.kapitalsog import show_capital_result
+from modules.stats import get_stats, init_db, log_request
 
 
-init_db()
+if os.getenv("STATS_ENABLED") == "true":
+    init_db()
 
 security = HTTPBasic()
 
 
 def verify_stats_auth(credentials: HTTPBasicCredentials = Depends(security)):
+    if os.getenv("STATS_ENABLED") != "true":
+        raise HTTPException(status_code=503, detail="Statistics are disabled")
     stats_password = os.getenv("STATS_PASSWORD", "")
     if not stats_password:
         raise HTTPException(status_code=503, detail="STATS_PASSWORD not configured")
@@ -59,22 +64,10 @@ class RequestLogMiddleware(BaseHTTPMiddleware):
         start = time.perf_counter()
         response = await call_next(request)
         elapsed_ms = (time.perf_counter() - start) * 1000
-        forwarded_for = request.headers.get("x-forwarded-for")
-        ip = (
-            forwarded_for.split(",")[0].strip()
-            if forwarded_for
-            else (request.client.host if request.client else None)
-        )
-        raw_referer = request.headers.get("referer") or request.headers.get("referrer")
-        referer = raw_referer[:500] if raw_referer else None
-        log_request(
-            request.method,
-            request.url.path,
-            response.status_code,
-            elapsed_ms,
-            ip=ip,
-            referer=referer,
-        )
+        response.headers["Cache-Control"] = "no-store"
+        # Stats are opt-in. Registry requests need no client IP or referrer storage.
+        if os.getenv("STATS_ENABLED") == "true":
+            log_request(request.method, request.url.path, response.status_code, elapsed_ms)
         return response
 
 
@@ -88,7 +81,7 @@ and returns a clean, stable shape.
 ### Quickstart
 
 ```bash
-curl https://apicvr.dk/api/v1/41013583
+curl https://YOUR_SERVICE/api/v1/41013583/signing-profile
 ```
 
 ### What you can do
@@ -102,12 +95,13 @@ curl https://apicvr.dk/api/v1/41013583
 
 ### Auth
 
-None. Rate limits apply — please be nice. If you're building something
-that needs sustained heavy traffic, drop a line: noah@noahbohme.com.
+No client credentials. The service operator must configure issued official
+CVR distribution credentials. Signing evidence requires operator interpretation
+of the complete registered rule; it never means a person can sign alone.
 
 ### Source & issues
 
-<https://github.com/NoahBohme/apicvr.dk>
+<https://github.com/AndersGerner/apicvr.dk>
 """
 
 
@@ -130,13 +124,8 @@ _TAGS_METADATA = [
 app = FastAPI(
     title="APICVR.dk",
     description=_API_DESCRIPTION,
-    version="1.0",
+    version="1.1",
     openapi_tags=_TAGS_METADATA,
-    contact={
-        "name": "Noah Böhme Rasmussen",
-        "url": "https://noahbohme.com",
-        "email": "noah@noahbohme.com",
-    },
     license_info={
         "name": "MIT License",
         "url": "https://raw.githubusercontent.com/NoahBohme/apicvr.dk/master/LICENSE",
@@ -149,7 +138,7 @@ app.add_middleware(RequestLogMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -159,6 +148,7 @@ app.add_middleware(
 
 _ERROR_STATUS = {
     "NOT_FOUND": 404,
+    "NOT_CONFIGURED": 503,
     "INVALID_CVR": 400,
     "HTTP_ERROR": 502,
     "INVALID_RESPONSE": 502,
@@ -184,39 +174,57 @@ def _base_context(request: Request) -> dict:
     return {"request": request, "base_url": base_url, "docs_url": docs_url}
 
 
+@app.get("/healthz", include_in_schema=False)
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/readyz", include_in_schema=False)
+def ready():
+    if not upstream_configured():
+        raise HTTPException(status_code=503, detail="Official CVR access is not configured")
+    return {"status": "configured", "upstreamVerified": False}
+
+
+@app.get("/api/v1/{cvrNumber}/signing-profile", response_model=SigningCompany, tags=["Companies"],
+         responses={**not_found_responses(), **upstream_error_responses(), 503: {"description": "Official access not configured"}})
+def signing_profile(cvrNumber: int):
+    return _unwrap(search_cvr_api(cvrNumber, include_relations=False))
+
+
 # --- Homepages -------------------------------------------------------------
 
 @app.get("/", include_in_schema=False)
-async def home_da(request: Request):
-    return templates.TemplateResponse("/homepage.html", _base_context(request))
+def home_da(request: Request):
+    return templates.TemplateResponse(request, "/homepage.html", _base_context(request))
 
 
 @app.get("/en/", include_in_schema=False)
-async def home_en(request: Request):
-    return templates.TemplateResponse("/homepage_en.html", _base_context(request))
+def home_en(request: Request):
+    return templates.TemplateResponse(request, "/homepage_en.html", _base_context(request))
 
 
 # --- Search UI -------------------------------------------------------------
 
 @app.get("/da/search/", include_in_schema=False)
-async def search_ui_da(request: Request):
-    return templates.TemplateResponse("/sogning.html", {"request": request})
+def search_ui_da(request: Request):
+    return templates.TemplateResponse(request, "/sogning.html", {"request": request})
 
 
 # --- Company detail pages --------------------------------------------------
 
 @app.get("/da/virksomhed/{cvrNumber}", include_in_schema=False)
-async def company_page_da(request: Request, cvrNumber: str):
+def company_page_da(request: Request, cvrNumber: str):
     return templates.TemplateResponse(
-        "/virksomhed.html",
+        request, "/virksomhed.html",
         {"request": request, "cvrNumber": cvrNumber, "info": _lookup_for_template(cvrNumber, lang="da")},
     )
 
 
 @app.get("/en/company/{cvrNumber}", include_in_schema=False)
-async def company_page_en(request: Request, cvrNumber: str):
+def company_page_en(request: Request, cvrNumber: str):
     return templates.TemplateResponse(
-        "/virksomhed_en.html",
+        request, "/virksomhed_en.html",
         {"request": request, "cvrNumber": cvrNumber, "info": _lookup_for_template(cvrNumber, lang="en")},
     )
 
@@ -414,14 +422,14 @@ def api_company(cvrNumber: int):
 # --- Kapitalsøg (capital-raise search) ------------------------------------
 
 @app.get("/da/kapitalsog/", include_in_schema=False)
-async def kapitalsog_ui(request: Request):
-    return templates.TemplateResponse("/kapitalsog.html", {"request": request})
+def kapitalsog_ui(request: Request):
+    return templates.TemplateResponse(request, "/kapitalsog.html", {"request": request})
 
 
 @app.get("/da/kapitalindsigt/{cvrNumber}", include_in_schema=False)
-async def kapitalindsigt_page(request: Request, cvrNumber: str):
+def kapitalindsigt_page(request: Request, cvrNumber: str):
     return templates.TemplateResponse(
-        "/kapitalresultat.html",
+        request, "/kapitalresultat.html",
         {"request": request, "data": show_capital_result(cvrNumber)},
     )
 
@@ -429,14 +437,14 @@ async def kapitalindsigt_page(request: Request, cvrNumber: str):
 # --- Stats -----------------------------------------------------------------
 
 @app.get("/stats", include_in_schema=False)
-async def stats_dashboard(request: Request, _: bool = Depends(verify_stats_auth)):
-    return templates.TemplateResponse("/stats.html", {"request": request, "stats": get_stats()})
+def stats_dashboard(request: Request, _: bool = Depends(verify_stats_auth)):
+    return templates.TemplateResponse(request, "/stats.html", {"request": request, "stats": get_stats()})
 
 
 # --- SEO / crawler files ---------------------------------------------------
 
 @app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
-async def robots_txt():
+def robots_txt():
     return (
         "User-agent: *\n"
         "Allow: /\n"
@@ -459,7 +467,7 @@ _SITEMAP_URLS = [
 
 
 @app.get("/sitemap.xml", include_in_schema=False)
-async def sitemap():
+def sitemap():
     def _url(loc, hreflangs, freq, prio):
         lines = [f"  <url>", f"    <loc>{loc}</loc>"]
         for lang, href in hreflangs:
