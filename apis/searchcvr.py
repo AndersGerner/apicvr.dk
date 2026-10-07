@@ -1,8 +1,10 @@
 """
-Client for the Danish CVR distribution API (distribution.virk.dk).
+Client for official CVR data and the hosted apicvr.dk fallback.
 
 Wraps the Elasticsearch endpoints ERST exposes for the public register
-of companies. Public functions all return plain dicts / lists so the FastAPI
+of companies when API_TOKEN is configured. Without it, documented hosted
+endpoints provide company enrichment with explicitly incomplete signing evidence.
+Public functions all return plain dicts / lists so the FastAPI
 routes and the Jinja templates can consume them directly.
 
 Failures return a stable error dict:
@@ -13,11 +15,15 @@ import json
 import os
 import re
 import asyncio
+from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
+from urllib.parse import quote
 
 import httpx
 from dotenv import load_dotenv
+from pydantic import ValidationError
 
+from apis.models import Company, CompanyFuzzy, CompanyRelations, SigningCompany
 from apis.signing import extract_signing
 
 
@@ -25,18 +31,14 @@ load_dotenv()
 
 # --- Configuration ---------------------------------------------------------
 
-_API_TOKEN = os.getenv("API_TOKEN", "")
+_API_TOKEN = os.getenv("API_TOKEN", "").strip()
 _BASE = "https://distribution.virk.dk"
+_HOSTED_BASE = "https://apicvr.dk"
 _COMPANY_URL = f"{_BASE}/cvr-permanent/virksomhed/_search"
 _PRODUCTION_UNIT_URL = f"{_BASE}/cvr-permanent/produktionsenhed/_search"
 _TIMEOUT = httpx.Timeout(3, connect=2)
 _MAX_RESPONSE_BYTES = 8_000_000
 _TOTAL_SECONDS = 8
-
-_HEADERS = {
-    "Authorization": f"Basic {_API_TOKEN}",
-    "Content-Type": "application/json",
-}
 
 # Only currently-active roles are surfaced (FUNKTION periode.gyldigTil is None).
 _DIRECTOR_FUNCTIONS = {"DIREKTØR", "ADM. DIR."}
@@ -76,11 +78,22 @@ def _post_search(
 
 
 async def _post_search_bounded(endpoint: str, payload: dict) -> Any:
+    result = await _request_json_bounded(
+        "POST", endpoint,
+        headers={"Authorization": f"Basic {_API_TOKEN.strip()}", "Content-Type": "application/json"},
+        json=payload,
+    )
+    if not isinstance(result, dict):
+        return {"error": "INVALID_RESPONSE", "status": 502, "message": None}
+    return result
+
+
+async def _request_json_bounded(method: str, endpoint: str, **kwargs) -> Any:
     # This deadline includes connect, headers and slow/trickled body reads.
     try:
         async with asyncio.timeout(_TOTAL_SECONDS):
             async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=False) as client:
-                async with client.stream("POST", endpoint, headers=_HEADERS, json=payload) as response:
+                async with client.stream(method, endpoint, **kwargs) as response:
                     if response.status_code != 200:
                         return {"error": "HTTP_ERROR", "status": response.status_code, "message": None}
                     body = bytearray()
@@ -89,7 +102,7 @@ async def _post_search_bounded(endpoint: str, payload: dict) -> Any:
                             return {"error": "INVALID_RESPONSE", "status": 502, "message": None}
                         body.extend(chunk)
                     result = json.loads(body)
-                    if not isinstance(result, dict):
+                    if not isinstance(result, (dict, list)) or (isinstance(result, dict) and result.get("error")):
                         return {"error": "INVALID_RESPONSE", "status": 502, "message": None}
                     return result
     except (httpx.HTTPError, TimeoutError):
@@ -101,6 +114,55 @@ async def _post_search_bounded(endpoint: str, payload: dict) -> Any:
 def upstream_configured() -> bool:
     """Presence only; successful official authentication needs a live lookup."""
     return bool(_API_TOKEN.strip())
+
+
+def selected_provider() -> str:
+    return "distribution.virk.dk" if upstream_configured() else "apicvr.dk"
+
+
+def _valid_cvr(value) -> bool:
+    return type(value) in (int, str) and re.fullmatch(r"[1-9][0-9]{7}", str(value)) is not None
+
+
+def _hosted_segment(value: str) -> str:
+    # Encode a single path segment, including dot-only values.
+    return quote(value, safe="").replace(".", "%2E")
+
+
+def _hosted_get(path: str, *, params=None, model=Company, cvr_number=None) -> Any:
+    """Consume documented hosted endpoints without forwarding any credentials."""
+    result = asyncio.run(_request_json_bounded(
+        "GET", f"{_HOSTED_BASE}{path}", headers={"Accept": "application/json"}, params=params,
+    ))
+    if _is_error(result):
+        if result["error"] == "HTTP_ERROR" and result["status"] == 404:
+            return _not_found()
+        return result
+
+    documents = [result] if cvr_number is not None else result
+    if not isinstance(documents, list) or len(documents) > 1000:
+        return {"error": "INVALID_RESPONSE", "status": 502, "message": None}
+    normalized = []
+    for document in documents:
+        if not isinstance(document, dict):
+            return {"error": "INVALID_RESPONSE", "status": 502, "message": None}
+        identity = document.get("cvr_number" if model is CompanyFuzzy else "vat")
+        if not _valid_cvr(identity) or (cvr_number is not None and int(identity) != cvr_number):
+            return {"error": "INVALID_RESPONSE", "status": 502, "message": None}
+        data = dict(document)
+        if model in (Company, SigningCompany):
+            # Hosted roles lack the registered rule and stable participant IDs.
+            # They cannot establish signing authority, even if extra fields appear.
+            data["signing"] = {
+                "schemaVersion": 1, "status": "incomplete", "rules": [], "participants": [],
+                "source": {"register": "CVR", "observedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                           "companyUpdatedAt": None},
+            }
+        try:
+            normalized.append(model.model_validate(data, extra="ignore").model_dump(mode="json", by_alias=True))
+        except ValidationError:
+            return {"error": "INVALID_RESPONSE", "status": 502, "message": None}
+    return normalized[0] if cvr_number is not None else normalized
 
 
 def _is_error(result: Any) -> bool:
@@ -132,8 +194,11 @@ def _not_found() -> dict:
 
 def search_cvr_api(cvr_number: int, *, include_relations: bool = True) -> dict:
     """Look up a company by CVR number, including production units and relations."""
-    if re.fullmatch(r"[1-9][0-9]{7}", str(cvr_number)) is None:
+    if not _valid_cvr(cvr_number):
         return {"error": "INVALID_CVR", "status": 400, "message": None}
+    if not upstream_configured():
+        return _hosted_get(f"/api/v1/{cvr_number}", cvr_number=cvr_number,
+                           model=Company if include_relations else SigningCompany)
     result = _post_search({"term": {"Vrvirksomhed.cvrNummer": cvr_number}}, size=2)
     if _is_error(result):
         return result
@@ -179,6 +244,11 @@ def search_cvr_api(cvr_number: int, *, include_relations: bool = True) -> dict:
 
 def get_company_relations(cvr_number: int) -> dict:
     """Return only current direktion, fully-liable participants, and legal owners."""
+    if not _valid_cvr(cvr_number):
+        return {"error": "INVALID_CVR", "status": 400, "message": None}
+    if not upstream_configured():
+        return _hosted_get(f"/api/v1/{cvr_number}/direktion-og-ansvarlig",
+                           cvr_number=cvr_number, model=CompanyRelations)
     result = _post_search(
         {"term": {"Vrvirksomhed.cvrNummer": cvr_number}},
         source=["Vrvirksomhed.cvrNummer", "Vrvirksomhed.deltagerRelation"],
@@ -218,6 +288,9 @@ def search_cvr_combined(
         })
     if not must:
         return []
+    if not upstream_configured():
+        params = {key: value for key, value in {"name": name, "cvr": cvr, "limit": limit}.items() if value is not None}
+        return _hosted_get("/api/v1/search", params=params)
 
     result = _post_search({"bool": {"must": must}}, size=limit)
     if _is_error(result):
@@ -227,6 +300,8 @@ def search_cvr_combined(
 
 def search_cvr_by_name(company_name: str, limit: int = 100) -> Any:
     """Match companies whose current name starts with the query."""
+    if not upstream_configured():
+        return _hosted_get(f"/api/v1/search/company/{_hosted_segment(company_name)}", params={"limit": limit})
     result = _post_search(
         {"match_phrase_prefix": {
             "Vrvirksomhed.virksomhedMetadata.nyesteNavn.navn": company_name
@@ -240,6 +315,8 @@ def search_cvr_by_name(company_name: str, limit: int = 100) -> Any:
 
 def search_cvr_by_fuzzy_name(company_name: str, limit: int = 100) -> Any:
     """Fuzzy-match on current company name. Returns a slimmer shape."""
+    if not upstream_configured():
+        return _hosted_get(f"/api/v1/search/fuzzy/{_hosted_segment(company_name)}", params={"limit": limit}, model=CompanyFuzzy)
     result = _post_search(
         {"multi_match": {
             "query": company_name,
@@ -268,6 +345,8 @@ def search_cvr_by_fuzzy_name(company_name: str, limit: int = 100) -> Any:
 
 def search_cvr_by_email(email: str, limit: int = 100) -> Any:
     """Find companies registered with the given email address."""
+    if not upstream_configured():
+        return _hosted_get(f"/api/v1/search/email/{_hosted_segment(email)}", params={"limit": limit})
     result = _post_search(
         {"match": {"Vrvirksomhed.elektroniskPost.kontaktoplysning": email}},
         source=["*"],
@@ -280,11 +359,15 @@ def search_cvr_by_email(email: str, limit: int = 100) -> Any:
 
 def search_cvr_by_email_domain(email_domain: str, limit: int = 100) -> Any:
     """Find companies whose registered email is on the given domain."""
+    if not upstream_configured():
+        return _hosted_get(f"/api/v1/search/email-domain/{_hosted_segment(email_domain)}", params={"limit": limit})
     return search_cvr_by_email(f"@{email_domain}", limit=limit)
 
 
 def search_cvr_by_phone(phone_number: str, limit: int = 100) -> Any:
     """Find companies by registered phone number."""
+    if not upstream_configured():
+        return _hosted_get(f"/api/v1/search/phone/{_hosted_segment(phone_number)}", params={"limit": limit})
     result = _post_search(
         {"match": {"Vrvirksomhed.telefonNummer.kontaktoplysning": phone_number}},
         source=["*"],
@@ -304,6 +387,11 @@ def search_cvr_by_address(
     cleaned = address.strip()
     if not cleaned:
         return []
+    if not upstream_configured():
+        params = {"address": address, "limit": limit}
+        if postal_code is not None:
+            params["postal_code"] = postal_code
+        return _hosted_get("/api/v1/search/address", params=params)
 
     components = _parse_address_components(cleaned)
     filters = _postal_code_filter(postal_code)
