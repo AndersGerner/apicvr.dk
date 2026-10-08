@@ -16,6 +16,7 @@ import os
 import re
 import asyncio
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Iterable, Optional
 from urllib.parse import quote
 
@@ -25,6 +26,9 @@ from pydantic import ValidationError
 
 from apis.models import Company, CompanyFuzzy, CompanyRelations, SigningCompany
 from apis.signing import extract_signing
+from apis.company_profile import (
+    MAX_COLLECTION, active, digits, mapping, hosted_profile, official_profile, sanitize_units,
+)
 from apis.contact_suggestions import hosted_contact_suggestions, official_contact_suggestions
 
 
@@ -153,6 +157,8 @@ def _hosted_get(path: str, *, params=None, model=Company, cvr_number=None) -> An
         data = dict(document)
         if model is SigningCompany:
             data["contactSuggestions"] = hosted_contact_suggestions(document)
+            data["profile"] = hosted_profile(document)
+            data["status"] = data["profile"]["companyStatus"]
         if model in (Company, SigningCompany):
             # Hosted roles lack the registered rule and stable participant IDs.
             # They cannot establish signing authority, even if extra fields appear.
@@ -230,6 +236,12 @@ def search_cvr_api(cvr_number: int, *, include_relations: bool = True) -> dict:
 
     if not include_relations:
         data["contactSuggestions"] = official_contact_suggestions(company, data["signing"])
+        today = datetime.fromisoformat(data["signing"]["source"]["observedAt"].replace("Z", "+00:00")).astimezone(ZoneInfo("Europe/Copenhagen")).date()
+        data["profile"] = official_profile(company, data, today, _ownership_range)
+        data["status"] = data["profile"]["companyStatus"]
+        units, complete = fetch_profile_p_units(company, cvr_number, today)
+        data["profile"]["productionUnits"] = units
+        data["profile"]["productionUnitsComplete"] = complete
         return data
 
     p_numbers = [
@@ -417,6 +429,78 @@ def search_cvr_by_address(
     return []
 
 
+def fetch_profile_p_units(company: dict, cvr_number: int, today) -> tuple:
+    """One bounded grouped lookup, retaining unknown/failure versus confirmed empty."""
+    references = company.get("penheder")
+    if not isinstance(references, list):
+        return None, None
+    numbers, complete = set(), True
+    for reference in references:
+        if not isinstance(reference, dict):
+            complete = False
+            continue
+        current = active(reference, today)
+        number = digits(reference.get("pNummer"), 10)
+        if current is None or number is None:
+            complete = False
+        elif current:
+            numbers.add(number)
+    if not numbers:
+        return ([], True) if complete else (None, False)
+    requested = sorted(numbers)[:MAX_COLLECTION]
+    complete = complete and len(numbers) <= MAX_COLLECTION
+    result = _post_search(
+        {"terms": {"VrproduktionsEnhed.pNummer": requested}},
+        endpoint=_PRODUCTION_UNIT_URL, source=["VrproduktionsEnhed"], size=MAX_COLLECTION,
+    )
+    envelope = mapping(result).get("hits")
+    if _is_error(result) or not isinstance(envelope, dict) or not isinstance(envelope.get("hits"), list):
+        return None, False
+    hits = envelope["hits"]
+    if len(hits) > MAX_COLLECTION:
+        return None, False
+    units, seen = [], set()
+    for hit in hits:
+        unit = mapping(mapping(mapping(hit).get("_source")).get("VrproduktionsEnhed"))
+        number = digits(unit.get("pNummer"), 10)
+        if number not in requested or number in seen:
+            complete = False
+            continue
+        seen.add(number)
+        relations = unit.get("virksomhedsrelation")
+        if not isinstance(relations, list) or not any(
+            isinstance(relation, dict) and type(relation.get("cvrNummer")) in (int, str)
+            and str(relation["cvrNummer"]) == str(cvr_number) and active(relation, today) is True
+            for relation in relations
+        ):
+            complete = False
+            continue
+        formatted = format_p_unit_data(unit)
+        lifecycle = unit.get("livsforloeb")
+        if lifecycle is not None:
+            if not isinstance(lifecycle, list):
+                complete = False
+                continue
+            if any(not isinstance(record, dict) or active(record, today) is None for record in lifecycle):
+                complete = False
+                continue
+            current_periods = [record for record in lifecycle if active(record, today) is True]
+            if lifecycle and len(current_periods) != 1:
+                complete = False
+                continue
+            current_period = mapping(current_periods[0].get("periode")) if current_periods else {}
+            formatted["startdate"] = current_period.get("gyldigFra")
+            formatted["enddate"] = current_period.get("gyldigTil")
+        units.append(formatted)
+    normalized, sanitized_complete = sanitize_units(units, today)
+    total = envelope.get("total")
+    if isinstance(total, dict):
+        total_is_exact = total.get("relation") == "eq" and type(total.get("value")) is int and total["value"] == len(hits)
+    else:
+        total_is_exact = type(total) is int and total == len(hits)
+    return normalized, complete and sanitized_complete and len(normalized) == len(requested) and total_is_exact
+
+
 def fetch_p_units(p_numbers: list) -> list:
     """Fetch full production-unit detail for each P-number. Returns [] on error."""
     if not p_numbers:
@@ -527,9 +611,9 @@ def _parse_address_components(address: str) -> dict:
 
 def format_company_data(company: dict, cvr_number: int) -> dict:
     """Convert raw Vrvirksomhed to the public API response schema."""
-    metadata = company.get("virksomhedMetadata") or {}
-    hovedbranche = metadata.get("nyesteHovedbranche") or {}
-    virksomhedsform = metadata.get("nyesteVirksomhedsform") or {}
+    metadata = mapping(company.get("virksomhedMetadata"))
+    hovedbranche = mapping(metadata.get("nyesteHovedbranche"))
+    virksomhedsform = mapping(metadata.get("nyesteVirksomhedsform"))
     livsforloeb = company.get("livsforloeb") or []
     first_period = _first_period(livsforloeb)
 
@@ -562,8 +646,8 @@ def format_company_data(company: dict, cvr_number: int) -> dict:
 
 def format_p_unit_data(p_unit: dict) -> dict:
     """Convert raw VrproduktionsEnhed to the public API response schema."""
-    metadata = p_unit.get("produktionsEnhedMetadata") or {}
-    hovedbranche = metadata.get("nyesteHovedbranche") or {}
+    metadata = mapping(p_unit.get("produktionsEnhedMetadata"))
+    hovedbranche = mapping(metadata.get("nyesteHovedbranche"))
     livsforloeb = p_unit.get("livsforloeb") or []
     first_period = _first_period(livsforloeb)
 
@@ -591,21 +675,21 @@ def format_p_unit_data(p_unit: dict) -> dict:
 # --- Metadata helpers ------------------------------------------------------
 
 def _first_period(livsforloeb: list) -> dict:
-    if livsforloeb and isinstance(livsforloeb[0], dict):
-        return livsforloeb[0].get("periode") or {}
+    if isinstance(livsforloeb, list) and livsforloeb and isinstance(livsforloeb[0], dict):
+        return mapping(livsforloeb[0].get("periode"))
     return {}
 
 
 def _metadata_name(metadata: dict) -> Optional[str]:
-    return (metadata.get("nyesteNavn") or {}).get("navn")
+    return mapping(metadata.get("nyesteNavn")).get("navn")
 
 
 def _combined_address(metadata: dict) -> Optional[str]:
-    return _format_address_line(metadata.get("nyesteBeliggenhedsadresse") or {})
+    return _format_address_line(mapping(metadata.get("nyesteBeliggenhedsadresse")))
 
 
 def _address_field(metadata: dict, field: str):
-    return (metadata.get("nyesteBeliggenhedsadresse") or {}).get(field)
+    return mapping(metadata.get("nyesteBeliggenhedsadresse")).get(field)
 
 
 _PHONE_RE = re.compile(r"\b\d{8}\b")
@@ -640,23 +724,25 @@ def _contact_website(metadata: dict) -> Optional[str]:
 
 
 def _employees(metadata: dict) -> Optional[int]:
-    return (metadata.get("nyesteErstMaanedsbeskaeftigelse") or {}).get("antalAnsatte")
+    return mapping(metadata.get("nyesteErstMaanedsbeskaeftigelse")).get("antalAnsatte")
 
 
 def _is_bankrupt(metadata: dict) -> bool:
-    return (metadata.get("nyesteStatus") or {}).get("kreditoplysningtekst") == "Konkurs"
+    return mapping(metadata.get("nyesteStatus")).get("kreditoplysningtekst") == "Konkurs"
 
 
 # --- Address line formatting (shared by company + deltager) ---------------
 
 def _format_address_line(address: dict) -> Optional[str]:
     vejnavn = address.get("vejnavn")
-    if not vejnavn:
+    if not isinstance(vejnavn, str) or not vejnavn:
+        return None
+    if any(value is not None and type(value) not in (str, int) for key, value in address.items() if key in {"husnummerFra", "husnummerTil", "bogstavFra", "bogstavTil", "etage"}):
         return None
     line = f"{vejnavn} {address.get('husnummerFra', '') or ''}".rstrip()
     if address.get("husnummerTil"):
         line += f"-{address['husnummerTil']}"
-    line += address.get("bogstavFra") or ""
+    line += str(address.get("bogstavFra") or "")
     if address.get("bogstavTil"):
         line += f"-{address['bogstavTil']}"
     if address.get("etage"):

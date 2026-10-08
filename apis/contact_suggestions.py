@@ -39,7 +39,7 @@ def hosted_contact_suggestions(document, *, observed_at=None):
                 start, end = person.get("startdate"), person.get("enddate")
                 if (start is not None and register_date(start) > today) or (end is not None and register_date(end) < today):
                     continue
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, OverflowError):
                 continue
             entries.append((person.get("name"), "LEGAL_OWNER" if key == "ejere" else person.get("role")))
     return _group(entries)
@@ -77,7 +77,7 @@ def official_contact_suggestions(company, signing):
                                 if isinstance(raw_fraction, bool):
                                     continue
                                 fraction = float(raw_fraction)
-                            except (ValueError, TypeError):
+                            except (ValueError, TypeError, OverflowError):
                                 continue
                             if active and isfinite(fraction) and 0 < fraction <= 1:
                                 entries.append((name, "LEGAL_OWNER"))
