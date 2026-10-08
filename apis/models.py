@@ -6,7 +6,7 @@ These are used with FastAPI's ``response_model`` so the OpenAPI schema
 fields flowing through without needing a schema bump on the caller side.
 """
 from datetime import date, datetime
-from typing import Any, List, Optional, Union
+from typing import Annotated, Any, List, Optional, Union
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -187,6 +187,12 @@ def upstream_error_responses() -> dict:
     return {502: {"model": ErrorResponse, "description": "CVR distribution API error"}}
 
 
+class ContactSuggestion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(..., min_length=1, max_length=300)
+    roles: List[Annotated[str, Field(min_length=1, max_length=200)]] = Field(..., min_length=1, max_length=20)
+
+
 class SigningCompany(BaseModel):
     """Bounded Lead profile; excludes personal addresses and ownership data."""
     vat: int
@@ -198,3 +204,4 @@ class SigningCompany(BaseModel):
     status: Optional[str] = None
     protected: Optional[bool] = None
     signing: SigningEvidence
+    contactSuggestions: List[ContactSuggestion] = Field(default_factory=list, max_length=200)
