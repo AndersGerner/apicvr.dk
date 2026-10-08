@@ -53,6 +53,7 @@ class HostedFallbackTests(unittest.TestCase):
             self.assertEqual(profile["signing"]["status"], "incomplete")
             self.assertEqual(profile["signing"]["rules"], [])
             self.assertEqual(profile["signing"]["participants"], [])
+            self.assertEqual(profile["contactSuggestions"], [{"name": "Candidate", "roles": ["DIREKTØR"]}])
             self.assertIsNone(profile["signing"]["source"]["companyUpdatedAt"])
             self.assertNotIn("Private address", response.text)
             self.assertNotIn("SECRET", response.text)
@@ -92,6 +93,38 @@ class HostedFallbackTests(unittest.TestCase):
         self.assertEqual(profile["signing"]["status"], "incomplete")
         self.assertEqual(profile["signing"]["participants"], [])
         self.assertNotIn("SECRET", json.dumps(profile))
+
+    def test_contact_suggestions_include_only_current_named_people_and_no_private_fields(self):
+        raw = {**PUBLIC_COMPANY,
+               "direktion": PUBLIC_COMPANY["direktion"] + [
+                   {"name": "Candidate", "type": "PERSON", "role": "DIREKTØR"},
+                   {"name": "Company owner", "type": "VIRKSOMHED", "role": "DIREKTØR"},
+                   {"name": "Future director", "type": "PERSON", "role": "DIREKTØR", "startdate": "2999-01-01"},
+                   {"name": "Former director", "type": "PERSON", "role": "DIREKTØR", "enddate": "2000-01-01"},
+                   {"name": "  ", "type": "PERSON", "role": "DIREKTØR"}],
+               "ejere": [{"name": "Candidate", "type": "PERSON", "ownership_percent": 1,
+                          "address": "Private owner address", "phone": "SECRET", "unitId": "SECRET"}],
+               "contactSuggestions": [{"name": "Injected candidate", "roles": ["SECRET"]}]}
+        with self.upstream(lambda _: httpx.Response(200, json=raw)) as (requests, _):
+            response = self.client.get("/api/v1/12345674/signing-profile")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["contactSuggestions"], [{"name": "Candidate", "roles": ["DIREKTØR", "LEGAL_OWNER"]}])
+        self.assertNotIn("Private", response.text)
+        self.assertNotIn("SECRET", response.text)
+        self.assertNotIn("ownership_percent", response.text)
+        self.assertNotIn("Injected", response.text)
+        self.assertEqual(response.json()["signing"]["participants"], [])
+        self.assertEqual(len(requests), 1)
+
+    def test_malformed_or_oversized_contact_collections_do_not_break_company_enrichment(self):
+        for people in [None, "invalid", [{"name": "x" * 301, "role": "DIREKTØR", "type": "PERSON"}],
+                       [{"name": str(i), "role": "DIREKTØR", "type": "PERSON"} for i in range(201)]]:
+            with self.subTest(people_type=type(people).__name__), self.upstream(
+                lambda _: httpx.Response(200, json={**PUBLIC_COMPANY, "direktion": people})
+            ):
+                response = self.client.get("/api/v1/12345674/signing-profile")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["contactSuggestions"], [])
 
     def test_full_profile_relations_and_documented_searches_use_hosted_contract(self):
         paths = [

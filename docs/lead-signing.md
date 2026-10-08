@@ -16,6 +16,8 @@ malformed memberships and missing rules have explicit states. A participant is
 a candidate; the complete rule determines whether a group is required. The API
 does not decide that a person may sign alone.
 
+The bounded profile includes `contactSuggestions`: current person names and registered roles from leadership, fully liable participants and legal owners. Company owners are excluded. Names are grouped only for contact suggestions, not treated as unique identities. Personal addresses, contact details, ownership fractions and register identifiers are omitted. Official mode also includes current board members and registered representatives. Hosted mode derives these suggestions from the same company response while retaining incomplete signing evidence with no signing participants. Suggestions never determine permission to sign.
+
 ## Access and deployment
 
 Consumers need no API credential. Provider selection is automatic:
@@ -55,8 +57,8 @@ works; process health alone does not prove upstream access. Never substitute
 fixtures for registry data in a deployed API.
 
 Set Lead platform API `CVR_API_BASE_URL` to this service's HTTPS origin.
-Free services may sleep, so the first lookup after inactivity may report
-unavailable and require a retry. Lead always calls our own service; it never
+Free services may sleep. Lead allows a single lookup up to 75 seconds for startup
+and provider processing; an unavailable or over-budget lookup offers a retry. Lead always calls our own service; it never
 needs the official credential or selects the upstream provider itself.
 
 ## Validation

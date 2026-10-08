@@ -25,6 +25,7 @@ from pydantic import ValidationError
 
 from apis.models import Company, CompanyFuzzy, CompanyRelations, SigningCompany
 from apis.signing import extract_signing
+from apis.contact_suggestions import hosted_contact_suggestions, official_contact_suggestions
 
 
 load_dotenv()
@@ -150,6 +151,8 @@ def _hosted_get(path: str, *, params=None, model=Company, cvr_number=None) -> An
         if not _valid_cvr(identity) or (cvr_number is not None and int(identity) != cvr_number):
             return {"error": "INVALID_RESPONSE", "status": 502, "message": None}
         data = dict(document)
+        if model is SigningCompany:
+            data["contactSuggestions"] = hosted_contact_suggestions(document)
         if model in (Company, SigningCompany):
             # Hosted roles lack the registered rule and stable participant IDs.
             # They cannot establish signing authority, even if extra fields appear.
@@ -226,6 +229,7 @@ def search_cvr_api(cvr_number: int, *, include_relations: bool = True) -> dict:
     data["signing"] = extract_signing(company)
 
     if not include_relations:
+        data["contactSuggestions"] = official_contact_suggestions(company, data["signing"])
         return data
 
     p_numbers = [
