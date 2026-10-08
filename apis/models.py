@@ -193,8 +193,50 @@ class ContactSuggestion(BaseModel):
     roles: List[Annotated[str, Field(min_length=1, max_length=200)]] = Field(..., min_length=1, max_length=20)
 
 
+class EmployeePeriod(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    year: int = Field(..., strict=True, ge=1900, le=2200)
+    month: Optional[int] = Field(None, strict=True, ge=1, le=12)
+
+
+class ProfileProductionUnit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    pNumber: str = Field(..., pattern=r"^[0-9]{10}$")
+    name: Optional[str] = Field(None, max_length=300)
+    address: Optional[str] = Field(None, max_length=250)
+    postalCode: Optional[str] = Field(None, max_length=32)
+    city: Optional[str] = Field(None, max_length=100)
+
+
+class ProfileCompanyOwner(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cvr: str = Field(..., pattern=r"^[1-9][0-9]{7}$")
+    name: str = Field(..., min_length=1, max_length=300)
+    ownershipRange: Optional[str] = Field(None, max_length=100)
+    votingRightsRange: Optional[str] = Field(None, max_length=100)
+
+
+class CompanyProfile(BaseModel):
+    """Auxiliary company information, separate from signing evidence."""
+    model_config = ConfigDict(extra="forbid")
+    companyEmail: Optional[str] = Field(None, max_length=320)
+    companyPhone: Optional[str] = Field(None, max_length=50)
+    website: Optional[str] = Field(None, max_length=2000)
+    industryCode: Optional[str] = Field(None, max_length=20)
+    industryDescription: Optional[str] = Field(None, max_length=300)
+    companyStatus: Optional[str] = Field(None, max_length=200)
+    bankrupt: Optional[bool] = Field(None, strict=True)
+    foundedOn: Optional[date] = None
+    closedOn: Optional[date] = None
+    employeeCount: Optional[int] = Field(None, strict=True, ge=0, le=100000000)
+    employeePeriod: Optional[EmployeePeriod] = None
+    productionUnits: Optional[List[ProfileProductionUnit]] = Field(None, max_length=200)
+    productionUnitsComplete: Optional[bool] = Field(None, strict=True)
+    companyOwners: Optional[List[ProfileCompanyOwner]] = Field(None, max_length=200)
+
+
 class SigningCompany(BaseModel):
-    """Bounded Lead profile; excludes personal addresses and ownership data."""
+    """Bounded Lead response; excludes personal addresses and personal owner data."""
     vat: int
     name: Optional[str] = None
     address: Optional[str] = None
@@ -205,3 +247,4 @@ class SigningCompany(BaseModel):
     protected: Optional[bool] = None
     signing: SigningEvidence
     contactSuggestions: List[ContactSuggestion] = Field(default_factory=list, max_length=200)
+    profile: Optional[CompanyProfile] = None

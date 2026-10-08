@@ -4,8 +4,9 @@ This fork belongs to AndersGerner. The original MIT source remains credited in
 LICENSE; operational changes and deployments use this repository only.
 
 `GET /api/v1/{cvr}/signing-profile` returns a bounded company profile and typed
-`signing` evidence. It makes one exact lookup using the selected provider,
-rejects mismatched identities and omits personal addresses and ownership data.
+`signing` evidence. It makes one exact company lookup using the selected provider,
+rejects mismatched identities and omits personal addresses and personal owner data.
+Official mode may make one additional grouped production-unit lookup, capped at 200.
 Official mode also rejects duplicate register hits.
 The original full-profile and search endpoints remain available.
 
@@ -17,6 +18,30 @@ a candidate; the complete rule determines whether a group is required. The API
 does not decide that a person may sign alone.
 
 The bounded profile includes `contactSuggestions`: current person names and registered roles from leadership, fully liable participants and legal owners. Company owners are excluded. Names are grouped only for contact suggestions, not treated as unique identities. Personal addresses, contact details, ownership fractions and register identifiers are omitted. Official mode also includes current board members and registered representatives. Hosted mode derives these suggestions from the same company response while retaining incomplete signing evidence with no signing participants. Suggestions never determine permission to sign.
+
+The optional `profile` is auxiliary company information, separate from immutable
+signing evidence. It includes company email/phone, an HTTP(S) website without
+credentials, industry, status/bankruptcy, founding/closure dates, employee count
+and reporting period, current production units and current registered legal
+**company** owners. Owner ranges remain ranges; they do not identify beneficial
+owners or establish signing authority. People remain name/role contact suggestions.
+
+Invalid or absent optional values are `null`; zero employees and false bankruptcy
+remain values. Hosted employee reporting periods remain `null` because its flat
+company response does not establish them. Collections contain at most 200 entries,
+are sanitized and sorted, and never forward arbitrary upstream fields or owner
+addresses. Oversized owner collections remain `null`.
+
+`productionUnitsComplete` is `null` when completeness is unknown, `true` for an
+officially confirmed complete collection (including an explicit empty collection),
+and `false` for truncation, malformed/missing units or provider failure. A failed official unit
+lookup returns `productionUnits: null` with completeness `false`, while preserving
+the successful company and signing lookup. Official mode verifies current unit
+links, P-number identity, current parent-company relations and exact upstream hit
+counts. Hosted arrays remain available but completeness is `null` unless
+sanitization or the 200-entry cap proves incompleteness (`false`); the hosted
+contract supplies no independent total count and may return an empty array after
+its own unit lookup fails.
 
 ## Access and deployment
 
