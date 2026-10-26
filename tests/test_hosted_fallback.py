@@ -86,6 +86,105 @@ class HostedFallbackTests(unittest.TestCase):
         self.assertEqual(requests[0].url.host, "distribution.virk.dk")
         self.assertNotIn("SECRET", response.text)
 
+    def test_official_transport_failure_recovers_only_incomplete_hosted_enrichment(self):
+        for failure in [httpx.ConnectError, httpx.ReadTimeout]:
+            def respond(request):
+                if request.url.host == "distribution.virk.dk":
+                    raise failure("SECRET official transport")
+                return httpx.Response(200, json={**PUBLIC_COMPANY,
+                    "signing": {"status": "available", "rules": ["SECRET"]}})
+
+            with self.subTest(failure=failure.__name__), self.upstream(respond, token="synthetic-issued-payload") as (requests, client):
+                response = self.client.get("/api/v1/12345674/signing-profile")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["name"], "Synthetic Company")
+            self.assertEqual(response.json()["signing"]["status"], "incomplete")
+            self.assertEqual(response.json()["signing"]["rules"], [])
+            self.assertEqual(response.json()["signing"]["participants"], [])
+            self.assertEqual(response.json()["contactSuggestions"], [{"name": "Candidate", "roles": ["DIREKTØR"]}])
+            self.assertIsNone(response.json()["signing"]["source"]["companyUpdatedAt"])
+            self.assertNotIn("SECRET", response.text)
+            self.assertNotIn("Private address", response.text)
+            self.assertEqual([request.url.host for request in requests], ["distribution.virk.dk", "apicvr.dk"])
+            self.assertEqual(requests[0].headers["authorization"], "Basic synthetic-issued-payload")
+            self.assertNotIn("authorization", requests[1].headers)
+            self.assertEqual(requests[1].method, "GET")
+            self.assertEqual(str(requests[1].url), "https://apicvr.dk/api/v1/12345674")
+            self.assertEqual(client.call_count, 2)
+            for call in client.call_args_list:
+                self.assertFalse(call.kwargs["follow_redirects"])
+                self.assertNotIn("verify", call.kwargs)
+
+    def test_official_auth_http_not_found_and_invalid_results_never_fall_back(self):
+        cases = [
+            (401, b"SECRET", "HTTP_ERROR", 502),
+            (403, b"SECRET", "HTTP_ERROR", 502),
+            (404, b"SECRET", "HTTP_ERROR", 502),
+            (500, b"SECRET", "HTTP_ERROR", 502),
+            (302, b"SECRET", "HTTP_ERROR", 502),
+            (200, b"SECRET not json", "INVALID_RESPONSE", 502),
+            (200, b'{"hits":{"hits":[]}}', "NOT_FOUND", 404),
+            (200, b'{"hits":null}', "INVALID_RESPONSE", 502),
+        ]
+        for status, body, error, expected in cases:
+            with self.subTest(status=status, error=error), self.upstream(lambda _: httpx.Response(status, content=body), token="synthetic") as (requests, _):
+                response = self.client.get("/api/v1/12345674/signing-profile")
+            self.assertEqual(response.status_code, expected)
+            self.assertEqual(response.json()["detail"]["error"], error)
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(requests[0].url.host, "distribution.virk.dk")
+            self.assertNotIn("SECRET", response.text)
+
+    def test_full_company_and_relations_transport_failures_do_not_change_provider(self):
+        def fail(_):
+            raise httpx.ConnectError("SECRET")
+        for path in ["/api/v1/12345674", "/api/v1/12345674/direktion-og-ansvarlig"]:
+            with self.subTest(path=path), self.upstream(fail, token="synthetic") as (requests, _):
+                response = self.client.get(path)
+            self.assertEqual(response.status_code, 502)
+            self.assertEqual(response.json()["detail"]["error"], "TRANSPORT_ERROR")
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(requests[0].url.host, "distribution.virk.dk")
+
+    def test_failed_hosted_recovery_is_sanitized_and_does_not_retry(self):
+        def fail(_):
+            raise httpx.ConnectError("SECRET")
+        with self.upstream(fail, token="synthetic") as (requests, _):
+            response = self.client.get("/api/v1/12345674/signing-profile")
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"]["error"], "TRANSPORT_ERROR")
+        self.assertEqual(len(requests), 2)
+        self.assertNotIn("authorization", requests[1].headers)
+        self.assertNotIn("SECRET", response.text)
+
+    def test_official_and_recovery_streams_each_obey_the_total_deadline(self):
+        import time
+
+        class Trickle(httpx.AsyncByteStream):
+            closed = False
+
+            async def __aiter__(self):
+                while True:
+                    await asyncio.sleep(0.03)
+                    yield b" "
+
+            async def aclose(self):
+                self.closed = True
+
+        streams = [Trickle(), Trickle()]
+        with patch.object(searchcvr, "_TOTAL_SECONDS", 0.08), self.upstream(
+            lambda request: httpx.Response(200, stream=streams[0 if request.url.host == "distribution.virk.dk" else 1]),
+            token="synthetic",
+        ) as (requests, _):
+            started = time.monotonic()
+            response = self.client.get("/api/v1/12345674/signing-profile")
+            elapsed = time.monotonic() - started
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"]["error"], "TRANSPORT_ERROR")
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(all(stream.closed for stream in streams))
+        self.assertLess(elapsed, 0.4)
+
     def test_hosted_signing_fields_are_not_trusted(self):
         raw = {**PUBLIC_COMPANY, "signing": {"status": "available", "rules": ["SECRET"]}}
         with self.upstream(lambda _: httpx.Response(200, json=raw)):

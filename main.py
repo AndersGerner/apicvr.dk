@@ -99,7 +99,9 @@ curl https://YOUR_SERVICE/api/v1/41013583/signing-profile
 No client credentials. Official mode requires issued CVR distribution credentials.
 Hosted fallback provides company enrichment but no registered signing rule or stable
 signing-participant IDs, so its signing evidence is explicitly incomplete. A configured
-token selects official mode exclusively; authentication failures do not trigger fallback.
+token selects official mode. Only `/signing-profile` may recover an official transport
+failure with hosted enrichment; authentication, HTTP and invalid-response failures
+never trigger fallback. Hosted recovery keeps signing evidence incomplete.
 Complete signing evidence still requires operator interpretation of the registered rule.
 
 ### Source & issues

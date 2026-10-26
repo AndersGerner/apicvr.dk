@@ -210,6 +210,11 @@ def search_cvr_api(cvr_number: int, *, include_relations: bool = True) -> dict:
                            model=Company if include_relations else SigningCompany)
     result = _post_search({"term": {"Vrvirksomhed.cvrNummer": cvr_number}}, size=2)
     if _is_error(result):
+        # Enrichment may recover from unavailable official transport, but hosted
+        # roles never replace registered signing evidence or an official answer.
+        if not include_relations and result["error"] == "TRANSPORT_ERROR":
+            return _hosted_get(f"/api/v1/{cvr_number}", cvr_number=cvr_number,
+                               model=SigningCompany)
         return result
 
     envelope = result.get("hits")
