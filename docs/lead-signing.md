@@ -6,6 +6,8 @@ LICENSE; operational changes and deployments use this repository only.
 `GET /api/v1/{cvr}/signing-profile` returns a bounded company profile and typed
 `signing` evidence. It makes one exact company lookup using the selected provider,
 rejects mismatched identities and omits personal addresses and personal owner data.
+If configured official transport fails, this bounded endpoint may make one hosted
+company lookup for enrichment only, with explicitly incomplete signing evidence.
 Official mode may make one additional grouped production-unit lookup, capped at 200.
 Official mode also rejects duplicate register hits.
 The original full-profile and search endpoints remain available.
@@ -50,7 +52,10 @@ Consumers need no API credential. Provider selection is automatic:
 - With `API_TOKEN` unset or blank, company, relations and search endpoints call
   the documented hosted `https://apicvr.dk` API without authentication.
 - With `API_TOKEN` set, the service queries the official CVR distribution API
-  directly. Invalid credentials or upstream failures do not trigger fallback.
+  directly. Only `/signing-profile` recovers an official transport error with one
+  hosted company lookup. Authentication failures, HTTP responses (including not
+  found), malformed responses and an official empty result never trigger fallback.
+  Full-profile, relations and search endpoints retain their selected provider.
 
 Official mode needs issued CVR System-to-System access. Set `API_TOKEN` to
 Base64 of the issued `username:password`, without the `Basic ` prefix, in
@@ -69,7 +74,11 @@ traffic requires a separate provider-capacity decision.
 
 The Docker runtime uses Python 3.12, verified TLS, no redirects, bounded responses
 and sanitized failures. HTTPX requests have connect/read timeouts and an eight-second
-total transport deadline. No request bodies, access logs, client IPs or referrers
+total deadline per upstream attempt. Official transport recovery makes at most two
+attempts (16 seconds combined transport budget), within Lead's 75-second timeout.
+Credentials are sent only to the official HTTPS endpoint; hosted recovery uses
+verified HTTPS without authorization headers or redirects. No request bodies,
+access logs, client IPs or referrers
 are recorded. Optional aggregate SQLite statistics are disabled in staging.
 The data catalogue mapping is documented in `apis/signing.py`.
 
