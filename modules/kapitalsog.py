@@ -42,9 +42,9 @@ def show_capital_result(cvr_number: str):
         }
     }
 
-    from apis.searchcvr import _post_search, _is_error
+    from apis.searchcvr import _REGISTRATION_TEXT_URL, _post_search, _is_error
     from fastapi import HTTPException
-    data = _post_search(payload["query"], endpoint="https://distribution.virk.dk/registreringstekster/registreringstekst/_search", size=3000, source=["*"])
+    data = _post_search(payload["query"], endpoint=_REGISTRATION_TEXT_URL, size=3000, source=["*"])
     if _is_error(data):
         raise HTTPException(status_code=503 if data["error"] == "NOT_CONFIGURED" else 502, detail=data)
 

@@ -57,6 +57,17 @@ Consumers need no API credential. Provider selection is automatic:
   found), malformed responses and an official empty result never trigger fallback.
   Full-profile, relations and search endpoints retain their selected provider.
 
+Official endpoint transport: ERST documents and serves
+`http://distribution.virk.dk` (plain HTTP, port 80). HTTPS on port 443 does not
+accept connections from the staging host, so every official attempt times out
+after the two-second connect limit and `/signing-profile` silently recovers with
+hosted, incomplete evidence (observed as ~2.3-second lookups since 26 October
+2026). The service defaults to HTTPS so a credential is never sent in clear text
+by accident. To use official access, the operator must explicitly set
+`CVR_OFFICIAL_BASE_URL=http://distribution.virk.dk` in Render; any other value
+falls back to the HTTPS default. That choice sends the Basic credential and query
+unencrypted to ERST, exactly as ERST's own guide and upstream apicvr.dk do.
+
 Official mode needs issued CVR System-to-System access. Set `API_TOKEN` to
 Base64 of the issued `username:password`, without the `Basic ` prefix, in
 Render's secret store, then redeploy. It must not be a random token. Never
@@ -76,7 +87,7 @@ The Docker runtime uses Python 3.12, verified TLS, no redirects, bounded respons
 and sanitized failures. HTTPX requests have connect/read timeouts and an eight-second
 total deadline per upstream attempt. Official transport recovery makes at most two
 attempts (16 seconds combined transport budget), within Lead's 75-second timeout.
-Credentials are sent only to the official HTTPS endpoint; hosted recovery uses
+Credentials are sent only to the official ERST endpoint (HTTPS by default, HTTP only when explicitly configured); hosted recovery uses
 verified HTTPS without authorization headers or redirects. No request bodies,
 access logs, client IPs or referrers
 are recorded. Optional aggregate SQLite statistics are disabled in staging.
@@ -103,3 +114,18 @@ mapping/transport behavior. Before accepting staging, verify a permitted live
 CVR identity, rule and participants against official data, then exercise Lead's
 protected lookup and a contract assessment with the required complete group.
 Health and deploy receipts alone do not satisfy this acceptance.
+
+## Enable official signing evidence on staging (runbook)
+
+Prerequisite: `API_TOKEN` already holds Base64 of the issued `username:password`.
+
+1. In Render service `leasio-cvr-staging` (srv-db324qom7kps73con4r0) set
+   `CVR_OFFICIAL_BASE_URL` to `http://distribution.virk.dk`.
+2. Deploy the latest reviewed `master` commit explicitly (auto-deploy is off).
+3. Verify: `GET /readyz` reports `provider: distribution.virk.dk`. Then do one Lead
+   customer CVR lookup and confirm the Render request log for
+   `/api/v1/<cvr>/signing-profile` drops well below two seconds and the Lead
+   evidence panel shows a registered rule (status not `incomplete`).
+   A 401/403 means the credential is wrong; no hosted fallback happens then.
+4. Rollback: delete `CVR_OFFICIAL_BASE_URL` (HTTPS default) and redeploy, or clear
+   `API_TOKEN` to return to hosted-only mode.
