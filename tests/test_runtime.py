@@ -31,6 +31,14 @@ class RuntimeTests(unittest.TestCase):
             "status": "configured", "provider": "distribution.virk.dk",
             "signingEvidenceSupported": True, "upstreamVerified": False})
 
+    def test_official_base_only_accepts_documented_erst_origins(self):
+        self.assertEqual(searchcvr._official_base(None), "https://distribution.virk.dk")
+        self.assertEqual(searchcvr._official_base(""), "https://distribution.virk.dk")
+        self.assertEqual(searchcvr._official_base(" http://distribution.virk.dk/ "), "http://distribution.virk.dk")
+        for rejected in ("http://evil.example", "http://distribution.virk.dk.evil.example",
+                         "ftp://distribution.virk.dk", "https://user@distribution.virk.dk"):
+            self.assertEqual(searchcvr._official_base(rejected), "https://distribution.virk.dk")
+
     def test_http_profile_preserves_signing_contract_and_omits_private_details(self):
         source = company()
         source["cvrNummer"] = "12345674"

@@ -37,10 +37,22 @@ load_dotenv()
 # --- Configuration ---------------------------------------------------------
 
 _API_TOKEN = os.getenv("API_TOKEN", "").strip()
-_BASE = "https://distribution.virk.dk"
+# ERST documents the official endpoint as plain HTTP (port 80); HTTPS on port 443
+# does not accept connections from our staging host. HTTPS stays the default so a
+# credential is never sent in clear text unless the operator opts in explicitly.
+_OFFICIAL_BASES = ("https://distribution.virk.dk", "http://distribution.virk.dk")
+
+
+def _official_base(value: Optional[str]) -> str:
+    candidate = (value or "").strip().rstrip("/")
+    return candidate if candidate in _OFFICIAL_BASES else _OFFICIAL_BASES[0]
+
+
+_BASE = _official_base(os.getenv("CVR_OFFICIAL_BASE_URL"))
 _HOSTED_BASE = "https://apicvr.dk"
 _COMPANY_URL = f"{_BASE}/cvr-permanent/virksomhed/_search"
 _PRODUCTION_UNIT_URL = f"{_BASE}/cvr-permanent/produktionsenhed/_search"
+_REGISTRATION_TEXT_URL = f"{_BASE}/registreringstekster/registreringstekst/_search"
 _TIMEOUT = httpx.Timeout(3, connect=2)
 _MAX_RESPONSE_BYTES = 8_000_000
 _TOTAL_SECONDS = 8
