@@ -1,5 +1,10 @@
 # Leasio CVR fork
 
+This repository is a fork of an MIT-licensed project. The original code stays
+under the MIT licence in the LICENSE file. The changes made for LEAD belong to
+FLEASING A/S.
+
+
 Our hosted CVR service and registered signing-evidence extension are documented
 in [Lead staging integration](docs/lead-signing.md).
 
